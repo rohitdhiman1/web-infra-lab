@@ -22,6 +22,8 @@ diffing two folders shows exactly what a module adds.
 | A3 Reliability | `a3-reliability` | Postgres; payments with `Idempotency-Key`; slow fake gateway; a retrying client with backoff + jitter |
 | A4 Concurrency and caching | `a4-concurrency-caching` | ETags from a version column; `If-None-Match` → 304; `If-Match` → 412; 428 without it; atomic version check |
 | A5 Collections | `a5-collections` | `GET /orders` with cursor (keyset) pagination, offset for comparison, status filter, `Link` headers |
+| A6 Evolving an API | `a6-evolving` | `/v1` and `/v2` over one store; `Deprecation`, `Sunset` and `Link` headers on v1; an additive field (in memory) |
+| A7 Long-running work | `a7-async-webhooks` | `202` + status resource; signed webhooks (Standard Webhooks) retried with backoff (in memory) |
 
 From A3 on, labs need Postgres: `docker compose up -d` in the module folder (port 55432, throwaway
 credentials `lab`/`lab`). The Java and Python labs share the schema and the port, so run one at a time;
