@@ -55,3 +55,8 @@ def test_filters_are_kept_in_the_next_link(http):
 def test_bad_parameters_are_400(http, query):
     res = http.get("/orders?" + query)
     assert res.status_code == 400 and res.json()["type"].endswith("invalid-parameter")
+
+
+def test_wrong_method_on_the_collection_lists_both_methods(http):
+    res = http.delete("/orders")
+    assert res.status_code == 405 and {"GET", "POST"} <= {m.strip() for m in res.headers["allow"].split(",")}

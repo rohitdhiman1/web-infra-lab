@@ -9,6 +9,7 @@ module and gives its lab spec and snippets; this repo holds complete projects th
 orders-api/
   java/<module>/     Spring Boot 4 on Java 25 (Maven Wrapper included)
   python/<module>/   FastAPI on Python 3.14 (managed with uv)
+  conformance/       black-box HTTP tests for the A10 capstone, any implementation
 ```
 
 Each module folder is a complete, independent snapshot. Later modules build on earlier ones, so
@@ -26,6 +27,19 @@ diffing two folders shows exactly what a module adds.
 | A7 Long-running work | `a7-async-webhooks` | `202` + status resource; signed webhooks (Standard Webhooks) retried with backoff (in memory) |
 | A8 API styles | `a8-api-styles` | A Server-Sent Events stream of order events, resumable with `Last-Event-ID`, with heartbeats (in memory) |
 | A9 Gateway and edge | `a9-gateway-edge` | Request ids (header, problem bodies, MDC), token-bucket rate limits per API key with 429, CORS (in memory) |
+| A10 Capstone | `a10-capstone` | Everything together on Postgres: orders with ETags, cursor pagination, idempotent payments, problem details, request ids, rate limits |
+
+## Capstone conformance suite
+
+`orders-api/conformance/` holds black-box tests for the A10 spec. They speak only HTTP, so they run
+against either reference implementation, or your own:
+
+```bash
+cd orders-api/java/a10-capstone && docker compose up -d && ./mvnw spring-boot:run     # or the Python one
+cd orders-api/conformance && BASE_URL=http://localhost:8080 uv run pytest -q
+```
+
+Both reference capstones pass all 11 tests.
 
 From A3 on, labs need Postgres: `docker compose up -d` in the module folder (port 55432, throwaway
 credentials `lab`/`lab`). The Java and Python labs share the schema and the port, so run one at a time;

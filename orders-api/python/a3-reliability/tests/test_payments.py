@@ -134,3 +134,8 @@ def test_post_is_only_retried_with_an_idempotency_key():
     plain = httpx2.Request("POST", "http://x/orders")
     keyed = httpx2.Request("POST", "http://x/orders", headers={"Idempotency-Key": "k"})
     assert not safe_to_retry(plain) and safe_to_retry(keyed) and safe_to_retry(httpx2.Request("GET", "http://x/"))
+
+
+def test_wrong_method_lists_every_allowed_method(http):
+    res = http.delete(f"{create_order(http)}/payments")
+    assert res.status_code == 405 and {"GET", "POST"} <= {m.strip() for m in res.headers["allow"].split(",")}

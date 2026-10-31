@@ -70,3 +70,8 @@ def test_lost_update_is_prevented_under_real_concurrency(http):
 
 def test_if_match_star_matches_any_version(http):
     assert patch(http, create(http), '{"customer": "x@example.com"}', If_Match="*").status_code == 200
+
+
+def test_wrong_method_lists_every_allowed_method(http):
+    res = http.delete(create(http))
+    assert res.status_code == 405 and {"GET", "PATCH"} <= {m.strip() for m in res.headers["allow"].split(",")}

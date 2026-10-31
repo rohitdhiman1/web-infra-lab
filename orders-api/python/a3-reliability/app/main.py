@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
+from starlette.routing import Match
 
 from . import db, idempotency, repository
 from .gateway import gateway
@@ -32,7 +33,17 @@ app.add_exception_handler(RequestValidationError, validation_handler)
 
 @app.exception_handler(HTTPException)
 async def http_error(request: Request, e: HTTPException):
-    return await api_error_handler(request, ApiError(e.status_code, None, str(e.detail), headers=dict(e.headers or {})))
+    """Starlette's 405 lists only the methods of the *first* route on that path (see A1).
+    RFC 9110 says Allow must list every method the resource supports, so collect them all."""
+    headers = dict(e.headers or {})
+    if e.status_code == 405:
+        methods = set()
+        for route in app.router.routes:
+            match, _ = route.matches({"type": "http", "path": request.url.path, "method": "\u0000"})
+            if match != Match.NONE:
+                methods |= getattr(route, "methods", set()) or set()
+        headers["Allow"] = ", ".join(sorted(methods))
+    return await api_error_handler(request, ApiError(e.status_code, None, str(e.detail), headers=headers))
 
 
 def json_body(request: Request) -> None:
