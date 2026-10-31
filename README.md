@@ -18,6 +18,12 @@ diffing two folders shows exactly what a module adds.
 |---|---|---|
 | A0 Foundations | `a0-first-api` | POST/GET on an in-memory orders collection; 201 + Location; 404 |
 | A1 HTTP semantics | `a1-http-semantics` | PUT, PATCH (JSON Merge Patch), DELETE, HEAD; 400/405/406/409/415/422 done deliberately |
+| A2 Errors and contracts | `a2-errors-contracts` | RFC 9457 problem details for every error (framework errors included); OpenAPI document |
+| A3 Reliability | `a3-reliability` | Postgres; payments with `Idempotency-Key`; slow fake gateway; a retrying client with backoff + jitter |
+
+From A3 on, labs need Postgres: `docker compose up -d` in the module folder (port 55432, throwaway
+credentials `lab`/`lab`). The Java and Python labs share the schema and the port, so run one at a time;
+their tests truncate the tables before each test.
 
 ## Running a lab
 

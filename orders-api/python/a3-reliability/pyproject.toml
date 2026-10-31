@@ -1,0 +1,21 @@
+[project]
+name = "orders-api"
+version = "0.0.1"
+description = "Web infra guide, API track: module A3 reference lab"
+requires-python = ">=3.14"
+dependencies = [
+  "fastapi==0.143.2",
+  "uvicorn==0.54.0",
+  "psycopg[binary]==3.3.6",
+  "psycopg-pool==3.3.3",
+  "httpx2==2.13.1",   # used by the retrying client in client/
+]
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

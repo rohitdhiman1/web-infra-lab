@@ -79,10 +79,14 @@ def create_order(body: OrderInput, response: Response):
     return order
 
 
-# FastAPI doesn't add HEAD for GET routes, so list it explicitly (Starlette drops the body).
-@app.api_route("/orders/{order_id}", methods=["GET", "HEAD"], response_model=Order)
+@app.get("/orders/{order_id}", response_model=Order)
 def get_order(order_id: str):
     return existing(order_id)
+
+
+# FastAPI doesn't add HEAD for GET routes. Register it separately (Starlette drops the body),
+# and keep it out of the OpenAPI document, where it would duplicate the GET operation.
+app.head("/orders/{order_id}", include_in_schema=False)(get_order)
 
 
 # PUT: replace every client-settable field. Idempotent: sending it twice leaves the same state.
