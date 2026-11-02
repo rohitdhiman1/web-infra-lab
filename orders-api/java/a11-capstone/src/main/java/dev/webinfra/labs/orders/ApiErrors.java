@@ -82,7 +82,11 @@ public class ApiErrors extends ResponseEntityExceptionHandler {
       Map.entry("idempotency-key-reused", "Idempotency-Key was used for a different request"),
       Map.entry("idempotency-key-in-progress", "A request with this Idempotency-Key is still in progress"),
       Map.entry("payment-failed", "The payment gateway failed"),
-      Map.entry("rate-limited", "Too many requests"));
+      Map.entry("rate-limited", "Too many requests"),
+      Map.entry("unauthenticated", "Authentication required"),
+      Map.entry("invalid-token", "Invalid or expired credential"),
+      Map.entry("insufficient-scope", "Not allowed"),
+      Map.entry("unknown-user", "Unknown user"));
 
   private static String path(WebRequest request) {
     return request instanceof ServletWebRequest s ? s.getRequest().getRequestURI() : "";
