@@ -56,6 +56,8 @@ class Order(ApiModel):
     created_at: datetime
     # Not in the body: it travels as the ETag header.
     version: int = Field(exclude=True)
+    # A10: the token's sub. Server-side only: never read from, or written to, a request body.
+    owner: str = Field(exclude=True)
 
     @property
     def etag(self) -> str:

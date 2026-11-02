@@ -26,6 +26,10 @@ TITLES = {
     "idempotency-key-in-progress": "A request with this Idempotency-Key is still in progress",
     "payment-failed": "The payment gateway failed",
     "rate-limited": "Too many requests",
+    "unauthenticated": "Authentication required",
+    "invalid-token": "Invalid or expired credential",
+    "insufficient-scope": "Not allowed",
+    "unknown-user": "Unknown user",
 }
 
 

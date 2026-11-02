@@ -1,7 +1,8 @@
-"""A10 capstone: everything from the API track in one service.
+"""A11 capstone: everything from the API track in one service.
 
     Orders with ETags and conditional writes (A4), cursor pagination (A5), problem details (A2),
-    idempotent payments (A3), request ids and per-client rate limits (A9).
+    idempotent payments (A3), request ids and per-client rate limits (A9), and authentication
+    plus scope and ownership checks (A10).
 
 Run:  docker compose up -d && uv run uvicorn app.main:app --port 8000
 Test: BASE_URL=http://localhost:8000 uv run pytest   (in ../../conformance)
@@ -28,7 +29,8 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.routing import Match
 
-from . import db, idempotency, repository
+from . import auth, db, idempotency, repository
+from .auth import Caller
 from .gateway import gateway
 from .http import (JSON, MERGE_PATCH, ApiError, api_error_handler, problem, require_accept_json,
                    require_content_type, validation_handler)
@@ -45,7 +47,7 @@ async def lifespan(_: FastAPI):
     db.pool.close()
 
 
-app = FastAPI(title="Orders API (A10 capstone)", lifespan=lifespan, dependencies=[Depends(require_accept_json)])
+app = FastAPI(title="Orders API (A11 capstone)", lifespan=lifespan, dependencies=[Depends(require_accept_json)])
 app.add_exception_handler(ApiError, api_error_handler)
 app.add_exception_handler(RequestValidationError, validation_handler)
 
@@ -75,6 +77,20 @@ def order_id(public_id: str) -> int:
     raise ApiError(404, "order-not-found", f"order {public_id} not found")
 
 
+def caller(request: Request) -> Caller:
+    return request.state.caller
+
+
+def visible(c: Caller, public_id: str, write: bool) -> Order:
+    """Object-level authorisation. Owners may read and write their orders; staff with orders:read:any
+    may read anyone's; only admins may write anyone's. Everyone else gets the same 404 as a missing order."""
+    any_owner = c.role == "admin" if write else c.has("orders:read:any")
+    order = repository.find_visible(order_id(public_id), c.id, any_owner)
+    if order is None:
+        raise ApiError(404, "order-not-found", f"order {public_id} not found")
+    return order
+
+
 def existing(public_id: str) -> Order:
     order = repository.find_order(order_id(public_id))
     if order is None:
@@ -95,18 +111,22 @@ def order_response(order: Order, status: int = 200, headers: dict | None = None)
 
 
 @app.post("/orders", status_code=201, response_model=Order, dependencies=[Depends(json_body)])
-def create_order(body: OrderInput):
+def create_order(body: OrderInput, request: Request):
+    c = caller(request)
+    c.require("orders:write")
     problems = body.problems(status_required=False)
     problems.pop("#/status", None)
     if problems:
         raise ApiError(422, "validation-error", "validation failed", problems)
-    order = repository.create_order(body)
+    order = repository.create_order(body, c.id)
     return order_response(order, 201, {"Location": f"/orders/{order.id}"})
 
 
 @app.get("/orders/{public_id}", response_model=Order)
 def get_order(public_id: str, request: Request):
-    order = existing(public_id)
+    c = caller(request)
+    c.require("orders:read")
+    order = visible(c, public_id, write=False)
     if matches(request.headers.get("if-none-match"), order.etag):
         # Unchanged: no body, just the validators. The client reuses its copy.
         return Response(status_code=304, headers={"ETag": order.etag, "Cache-Control": REVALIDATE})
@@ -115,13 +135,15 @@ def get_order(public_id: str, request: Request):
 
 @app.patch("/orders/{public_id}", response_model=Order)
 async def patch_order(public_id: str, request: Request):
+    c = caller(request)
+    c.require("orders:write")
     require_content_type(request, MERGE_PATCH, header="Accept-Patch")
     raw = await request.body()
-    return await run_in_threadpool(apply_patch, public_id, request.headers.get("if-match"), raw)
+    return await run_in_threadpool(apply_patch, c, public_id, request.headers.get("if-match"), raw)
 
 
-def apply_patch(public_id: str, if_match: str | None, raw: bytes):
-    current = existing(public_id)
+def apply_patch(c: Caller, public_id: str, if_match: str | None, raw: bytes):
+    current = visible(c, public_id, write=True)
     if current.status in ("paid", "paying"):
         raise ApiError(409, "order-locked", f"order {public_id} is {current.status} and can't be changed")
     if if_match is None:
@@ -182,8 +204,12 @@ def link(limit: int, status: str | None, name: str, value: str) -> str:
 
 
 @app.get("/orders")
-def list_orders(limit: str | None = None, cursor: str | None = None, offset: str | None = None,
+def list_orders(request: Request, limit: str | None = None, cursor: str | None = None, offset: str | None = None,
                 status: str | None = None):
+    c = caller(request)
+    c.require("orders:read")
+    # You see your own orders; staff with orders:read:any see everyone's. Never a ?owner= parameter.
+    owner = None if c.has("orders:read:any") else c.id
     size = int_param("limit", limit, 20, 1, 100)
     if status is not None and status not in ("pending", "paying", "paid", "cancelled"):
         raise bad("status must be one of pending, paying, paid, cancelled")
@@ -193,11 +219,11 @@ def list_orders(limit: str | None = None, cursor: str | None = None, offset: str
     # Ask for one extra row: if it comes back, there's a next page.
     if offset is not None:
         start = int_param("offset", offset, 0, 0, 2**31 - 1)
-        rows = repository.page_at_offset(start, status, size + 1)
+        rows = repository.page_at_offset(owner, start, status, size + 1)
         if len(rows) > size:
             next_link = link(size, status, "offset", str(start + size))
     else:
-        rows = repository.page_after(decode_cursor(cursor) if cursor else None, status, size + 1)
+        rows = repository.page_after(owner, decode_cursor(cursor) if cursor else None, status, size + 1)
         if len(rows) > size:
             next_link = link(size, status, "cursor", encode_cursor(rows[size - 1]))
     body = {"data": [o.model_dump(by_alias=True, mode="json") for o in rows[:size]], "next": next_link}
@@ -206,18 +232,25 @@ def list_orders(limit: str | None = None, cursor: str | None = None, offset: str
 
 
 @app.get("/orders/{public_id}/payments")
-def list_payments(public_id: str):
-    order = existing(public_id)
+def list_payments(public_id: str, request: Request):
+    c = caller(request)
+    c.require("orders:read")
+    order = visible(c, public_id, write=False)
     return {"data": [p.model_dump(by_alias=True, mode="json") for p in repository.payments(order_id(order.id))]}
 
 
 # POST isn't idempotent by itself; the Idempotency-Key makes this one safe to retry.
 @app.post("/orders/{public_id}/payments", status_code=201, dependencies=[Depends(json_body)])
 async def create_payment(public_id: str, request: Request):
+    c = caller(request)
+    c.require("orders:write")
+    await run_in_threadpool(visible, c, public_id, True)  # 404 before anything else: not your order
     key = request.headers.get("idempotency-key", "").strip()
     if not key:
         raise ApiError(400, "idempotency-key-missing",
                        "send an Idempotency-Key header (a fresh UUID per payment) so retries can't charge twice")
+    # Keys are per caller, as at Stripe: Bob reusing Alice's key must not see Alice's response.
+    key = f"{c.id}:{key}"
     raw = await request.body()
     # This handler is async (to read the raw body), so every blocking call (Postgres, the slow
     # gateway) runs in the thread pool. Blocking the event loop here would stall every request.
@@ -259,6 +292,41 @@ def charge(public_id: str, raw: bytes, key: str):
         raise ApiError(502, "payment-failed", f"the payment gateway failed: {e}")
 
 
+# ---------------------------------------------------------------- the token issuer (stand-in IdP, as in A10)
+PUBLIC_PATHS = {"/token", "/.well-known/jwks.json"}
+
+
+@app.post("/token", dependencies=[Depends(json_body)])
+async def token(request: Request):
+    try:
+        user = (await request.json()).get("user")
+    except (ValueError, AttributeError):
+        raise ApiError(400, "malformed-body", "request body is not a JSON object")
+    if user not in auth.USERS:
+        raise ApiError(400, "unknown-user", f"no such user: {user}")
+    return JSONResponse({"access_token": auth.issue_token(user), "token_type": "Bearer", "expires_in": auth.TOKEN_TTL},
+                        headers={"Cache-Control": "no-store"})  # tokens must never sit in a cache
+
+
+@app.get("/.well-known/jwks.json")
+def jwks():
+    return auth.jwks()
+
+
+# ---------------------------------------------------------------- authentication
+# Middleware runs in reverse order of definition: request id -> rate limit -> authentication -> route.
+@app.middleware("http")
+async def authenticate_requests(request: Request, call_next):
+    """Every path except the public ones needs a credential: deny by default."""
+    if request.url.path in PUBLIC_PATHS or request.method == "OPTIONS":
+        return await call_next(request)
+    try:
+        request.state.caller = auth.authenticate(request.headers.get("authorization"), request.headers.get("x-api-key"))
+    except auth.Unauthenticated as e:
+        return problem(request, 401, e.type, e.detail, headers={"WWW-Authenticate": e.challenge})
+    return await call_next(request)
+
+
 CAPACITY = int(os.environ.get("RATELIMIT_CAPACITY", "100"))
 RATE = float(os.environ.get("RATELIMIT_REFILL_PER_SECOND", "50"))
 SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
@@ -288,12 +356,14 @@ BUCKETS: dict[str, TokenBucket] = {}
 
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
-    """One bucket per client: the API key, or the IP if there's no key. In memory, so per instance:
-    N instances behind a load balancer give a client N times the limit. Shared limits need a shared store."""
+    """One bucket per client: its credential (API key or bearer token, hashed), or the IP if it has none.
+    This runs before authentication, so it also slows down credential guessing; production setups usually
+    add a per-IP limit too. In memory, so per instance: N instances give a client N times the limit."""
     if request.method == "OPTIONS":
         return await call_next(request)  # CORS preflights are free
-    key = request.headers.get("x-api-key")
-    client = f"key:{key}" if key else f"ip:{request.client.host}"  # behind a proxy: trusted X-Forwarded-For only
+    key, bearer = request.headers.get("x-api-key"), request.headers.get("authorization")
+    client = (f"key:{auth.sha256(key)}" if key else f"token:{auth.sha256(bearer)}" if bearer
+              else f"ip:{request.client.host}")  # behind a proxy: trusted X-Forwarded-For only
     allowed, remaining, retry_after = BUCKETS.setdefault(client, TokenBucket(CAPACITY, RATE)).take()
     limits = {"X-RateLimit-Limit": str(CAPACITY), "X-RateLimit-Remaining": str(remaining)}
     if not allowed:

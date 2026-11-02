@@ -6,7 +6,8 @@ from .models import Order, OrderInput, Payment
 
 def _order(row: dict) -> Order:
     return Order(id=f"ord_{row['id']}", customer=row["customer"], currency=row["currency"], items=row["items"],
-                 total=row["total"], status=row["status"], created_at=row["created_at"], version=row["version"])
+                 total=row["total"], status=row["status"], created_at=row["created_at"], version=row["version"],
+                 owner=row["owner"])
 
 
 def _total(data: OrderInput) -> int:
@@ -17,18 +18,28 @@ def _items(data: OrderInput) -> str:
     return json.dumps([i.model_dump(by_alias=True) for i in data.items])
 
 
-def create_order(data: OrderInput) -> Order:
+def create_order(data: OrderInput, owner: str) -> Order:
+    """The owner comes from the caller's token, never from the request body."""
     with pool.connection() as conn:
         row = conn.execute(
-            "INSERT INTO orders (customer, currency, items, total, status) "
-            "VALUES (%s, %s, %s::jsonb, %s, 'pending') RETURNING *",
-            (data.customer, data.currency, _items(data), _total(data))).fetchone()
+            "INSERT INTO orders (customer, currency, items, total, status, owner) "
+            "VALUES (%s, %s, %s::jsonb, %s, 'pending', %s) RETURNING *",
+            (data.customer, data.currency, _items(data), _total(data), owner)).fetchone()
     return _order(row)
 
 
 def find_order(order_id: int) -> Order | None:
     with pool.connection() as conn:
         row = conn.execute("SELECT * FROM orders WHERE id = %s", (order_id,)).fetchone()
+    return _order(row) if row else None
+
+
+def find_visible(order_id: int, caller: str, any_owner: bool) -> Order | None:
+    """A10, object-level authorisation in the query itself: an order that isn't yours comes back
+    exactly like one that doesn't exist. any_owner is True for staff who may see every order."""
+    with pool.connection() as conn:
+        row = conn.execute("SELECT * FROM orders WHERE id = %s AND (owner = %s OR %s)",
+                           (order_id, caller, any_owner)).fetchone()
     return _order(row) if row else None
 
 
@@ -43,25 +54,27 @@ def update_if_version(order_id: int, expected_version: int, data: OrderInput) ->
         return cur.rowcount == 1
 
 
-def page_after(before_id: int | None, status: str | None, limit: int) -> list[Order]:
+def page_after(owner: str | None, before_id: int | None, status: str | None, limit: int) -> list[Order]:
     """Keyset (cursor) pagination: "the next `limit` orders older than the last one you saw".
     WHERE id < %s uses the primary-key index, so page 1,000 costs the same as page 1, and rows
     inserted or deleted elsewhere can't shift what you see next."""
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM orders WHERE (%(b)s::bigint IS NULL OR id < %(b)s) "
+            "SELECT * FROM orders WHERE (%(u)s::text IS NULL OR owner = %(u)s) "
+            "AND (%(b)s::bigint IS NULL OR id < %(b)s) "
             "AND (%(s)s::text IS NULL OR status = %(s)s) ORDER BY id DESC LIMIT %(n)s",
-            {"b": before_id, "s": status, "n": limit}).fetchall()
+            {"u": owner, "b": before_id, "s": status, "n": limit}).fetchall()
     return [_order(r) for r in rows]
 
 
-def page_at_offset(offset: int, status: str | None, limit: int) -> list[Order]:
+def page_at_offset(owner: str | None, offset: int, status: str | None, limit: int) -> list[Order]:
     """Offset pagination, for comparison: the database still reads and throws away `offset` rows."""
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM orders WHERE (%(s)s::text IS NULL OR status = %(s)s) "
+            "SELECT * FROM orders WHERE (%(u)s::text IS NULL OR owner = %(u)s) "
+            "AND (%(s)s::text IS NULL OR status = %(s)s) "
             "ORDER BY id DESC LIMIT %(n)s OFFSET %(o)s",
-            {"s": status, "n": limit, "o": offset}).fetchall()
+            {"u": owner, "s": status, "n": limit, "o": offset}).fetchall()
     return [_order(r) for r in rows]
 
 

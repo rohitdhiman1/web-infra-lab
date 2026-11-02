@@ -1,11 +1,13 @@
 [project]
 name = "orders-api"
 version = "0.0.1"
-description = "Web infra guide, API track: A10 capstone reference implementation"
+description = "Web infra guide, API track: A11 capstone reference implementation"
 requires-python = ">=3.14"
 dependencies = [
   "fastapi==0.143.2",
   "uvicorn==0.54.0",
   "psycopg[binary]==3.3.6",
   "psycopg-pool==3.3.3",
+  "pyjwt==2.15.1",
+  "cryptography==50.0.2",
 ]
