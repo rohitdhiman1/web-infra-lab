@@ -15,7 +15,9 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * One token bucket per client, keyed by API key (or by IP address if there's no key).
+ * One token bucket per client, keyed by its credential (API key or bearer token), or by IP if it has none.
+ * This runs before authentication, so it also slows down anyone guessing credentials. A credential it
+ * hasn't verified yet is only a bucket name here; production setups usually add a per-IP limit too.
  * Every response says how much budget is left; a refused request gets 429 + Retry-After.
  *
  * In-memory, so each server instance has its own buckets: with N instances behind a load balancer
@@ -45,8 +47,11 @@ public class RateLimitFilter extends OncePerRequestFilter {
   protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res, FilterChain chain)
       throws ServletException, IOException {
     String apiKey = req.getHeader("X-API-Key");
+    String bearer = req.getHeader("Authorization");
     // Behind a proxy, getRemoteAddr() is the proxy. Use X-Forwarded-For only from a proxy you trust (Part 8).
-    String client = apiKey != null ? "key:" + apiKey : "ip:" + req.getRemoteAddr();
+    String client = apiKey != null ? "key:" + ApiKeyFilter.sha256(apiKey)
+        : bearer != null ? "token:" + ApiKeyFilter.sha256(bearer)   // hashed: never keep credentials in memory maps
+        : "ip:" + req.getRemoteAddr();
     var d = buckets.computeIfAbsent(client, k -> new TokenBucket(capacity, rate, System.nanoTime()))
         .take(System.nanoTime());
     res.setHeader("X-RateLimit-Limit", String.valueOf(capacity));

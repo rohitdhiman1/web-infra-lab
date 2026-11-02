@@ -7,6 +7,7 @@ import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -22,6 +23,7 @@ import tools.jackson.databind.ObjectMapper;
  *   GET   + If-None-Match  -> 304 Not Modified if unchanged (saves the body)
  *   PATCH + If-Match       -> 412 if someone changed it since you read it (no lost updates)
  *   PATCH without If-Match -> 428: this API insists on conditional writes
+ * A10: every handler checks the scope (403), then whether this caller may see this order (404).
  */
 @RestController
 @RequestMapping(path = "/orders", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -38,20 +40,25 @@ public class OrderController {
   }
 
   @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
-  public ResponseEntity<Order> create(@RequestBody OrderInput body) {
+  public ResponseEntity<Order> create(@RequestBody OrderInput body, Authentication auth) {
+    Caller c = Caller.from(auth);
+    c.require("orders:write");
     var problems = body.problems(false);
     problems.remove("#/status");
     if (!problems.isEmpty()) {
       throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "validation-error", "validation failed", problems);
     }
-    Order order = orders.create(body);
+    Order order = orders.create(body, c.id());
     return ResponseEntity.created(URI.create("/orders/" + order.id())).eTag(order.etag()).body(order);
   }
 
   @GetMapping("/{id}")
   public ResponseEntity<Order> get(@PathVariable String id,
-                                   @RequestHeader(name = "If-None-Match", required = false) String ifNoneMatch) {
-    Order order = existing(id);
+                                   @RequestHeader(name = "If-None-Match", required = false) String ifNoneMatch,
+                                   Authentication auth) {
+    Caller c = Caller.from(auth);
+    c.require("orders:read");
+    Order order = visible(orders, c, id, false);
     if (matches(ifNoneMatch, order.etag())) {
       // Unchanged: no body, just the validators. The client reuses its copy.
       return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(order.etag()).cacheControl(REVALIDATE).build();
@@ -62,8 +69,10 @@ public class OrderController {
   @PatchMapping(path = "/{id}", consumes = MERGE_PATCH)
   public ResponseEntity<Order> patch(@PathVariable String id,
                                      @RequestHeader(name = "If-Match", required = false) String ifMatch,
-                                     @RequestBody String raw) {
-    Order current = existing(id);
+                                     @RequestBody String raw, Authentication auth) {
+    Caller c = Caller.from(auth);
+    c.require("orders:write");
+    Order current = visible(orders, c, id, true);
     if (current.status().equals("paid") || current.status().equals("paying")) {
       throw new ApiException(HttpStatus.CONFLICT, "order-locked", "order " + id + " is " + current.status() + " and can't be changed");
     }
@@ -81,7 +90,7 @@ public class OrderController {
       throw new ApiException(HttpStatus.PRECONDITION_FAILED, "precondition-failed",
           "order " + id + " changed while your update was being applied; GET it again");
     }
-    Order updated = existing(id);
+    Order updated = orders.find(Ids.order(id)).orElseThrow(() -> Ids.notFound(id));
     return ResponseEntity.ok().eTag(updated.etag()).cacheControl(REVALIDATE).body(updated);
   }
 
@@ -115,12 +124,19 @@ public class OrderController {
   }
 
   @GetMapping("/{id}/payments")
-  public Map<String, Object> payments(@PathVariable String id) {
-    existing(id);
+  public Map<String, Object> payments(@PathVariable String id, Authentication auth) {
+    Caller c = Caller.from(auth);
+    c.require("orders:read");
+    visible(orders, c, id, false);
     return Map.of("data", orders.payments(Ids.order(id)));
   }
 
-  private Order existing(String id) {
-    return orders.find(Ids.order(id)).orElseThrow(() -> Ids.notFound(id));
+  /**
+   * Object-level authorisation. Owners may read and write their orders; staff with orders:read:any
+   * may read anyone's; only admins may write anyone's. Everyone else gets the same 404 as a missing order.
+   */
+  static Order visible(OrderRepository orders, Caller c, String id, boolean write) {
+    boolean anyOwner = write ? "admin".equals(c.role()) : c.has("orders:read:any");
+    return orders.findVisible(Ids.order(id), c.id(), anyOwner).orElseThrow(() -> Ids.notFound(id));
   }
 }

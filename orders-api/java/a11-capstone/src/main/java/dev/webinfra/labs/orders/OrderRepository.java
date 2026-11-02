@@ -21,11 +21,12 @@ public class OrderRepository {
     return in.items().stream().mapToLong(i -> i.quantity() * i.unitPrice()).sum();
   }
 
-  public Order create(OrderInput in) {
+  /** The owner comes from the caller's token, never from the request body. */
+  public Order create(OrderInput in, String owner) {
     long id = db.sql("""
-            INSERT INTO orders (customer, currency, items, total, status)
-            VALUES (?, ?, ?::jsonb, ?, 'pending') RETURNING id""")
-        .params(in.customer(), in.currency(), json.writeValueAsString(in.items()), total(in))
+            INSERT INTO orders (customer, currency, items, total, status, owner)
+            VALUES (?, ?, ?::jsonb, ?, 'pending', ?) RETURNING id""")
+        .params(in.customer(), in.currency(), json.writeValueAsString(in.items()), total(in), owner)
         .query(Long.class).single();
     return find(id).orElseThrow();
   }
@@ -33,11 +34,21 @@ public class OrderRepository {
   private Order row(java.sql.ResultSet rs) throws java.sql.SQLException {
     return new Order("ord_" + rs.getLong("id"), rs.getString("customer"), rs.getString("currency"),
         json.readValue(rs.getString("items"), new TypeReference<List<Order.OrderItem>>() {}),
-        rs.getLong("total"), rs.getString("status"), rs.getTimestamp("created_at").toInstant(), rs.getInt("version"));
+        rs.getLong("total"), rs.getString("status"), rs.getTimestamp("created_at").toInstant(), rs.getInt("version"),
+        rs.getString("owner"));
   }
 
   public Optional<Order> find(long id) {
     return db.sql("SELECT * FROM orders WHERE id = ?").param(id).query((rs, n) -> row(rs)).optional();
+  }
+
+  /**
+   * A10, object-level authorisation in the query itself: an order that isn't yours comes back
+   * exactly like one that doesn't exist. `anyOwner` is true for staff who may see every order.
+   */
+  public Optional<Order> findVisible(long id, String caller, boolean anyOwner) {
+    return db.sql("SELECT * FROM orders WHERE id = ? AND (owner = ? OR ?)")
+        .params(id, caller, anyOwner).query((rs, n) -> row(rs)).optional();
   }
 
   /** Only one request can move an order from pending to paying. Bumps the version: the ETag changes. */
@@ -76,21 +87,23 @@ public class OrderRepository {
    * The WHERE id < ? uses the primary-key index, so page 1,000 costs the same as page 1,
    * and rows inserted or deleted elsewhere can't shift what you see next.
    */
-  public List<Order> pageAfter(Long beforeId, String status, int limit) {
+  public List<Order> pageAfter(String owner, Long beforeId, String status, int limit) {
     return db.sql("""
             SELECT * FROM orders
-            WHERE (CAST(? AS BIGINT) IS NULL OR id < ?) AND (CAST(? AS TEXT) IS NULL OR status = ?)
+            WHERE (CAST(? AS TEXT) IS NULL OR owner = ?)
+              AND (CAST(? AS BIGINT) IS NULL OR id < ?) AND (CAST(? AS TEXT) IS NULL OR status = ?)
             ORDER BY id DESC LIMIT ?""")
-        .params(beforeId, beforeId, status, status, limit)
+        .params(owner, owner, beforeId, beforeId, status, status, limit)
         .query((rs, n) -> row(rs)).list();
   }
 
   /** Offset pagination, for comparison: the database still reads and throws away `offset` rows. */
-  public List<Order> pageAtOffset(int offset, String status, int limit) {
+  public List<Order> pageAtOffset(String owner, int offset, String status, int limit) {
     return db.sql("""
-            SELECT * FROM orders WHERE (CAST(? AS TEXT) IS NULL OR status = ?)
+            SELECT * FROM orders
+            WHERE (CAST(? AS TEXT) IS NULL OR owner = ?) AND (CAST(? AS TEXT) IS NULL OR status = ?)
             ORDER BY id DESC LIMIT ? OFFSET ?""")
-        .params(status, status, limit, offset)
+        .params(owner, owner, status, status, limit, offset)
         .query((rs, n) -> row(rs)).list();
   }
 

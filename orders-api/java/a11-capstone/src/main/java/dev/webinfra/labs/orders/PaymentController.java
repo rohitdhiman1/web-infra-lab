@@ -8,6 +8,7 @@ import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -38,7 +39,10 @@ public class PaymentController {
       produces = MediaType.APPLICATION_JSON_VALUE)
   public ResponseEntity<String> pay(@PathVariable String id,
                                     @RequestHeader(name = "Idempotency-Key", required = false) String key,
-                                    @RequestBody String raw, HttpServletRequest request) {
+                                    @RequestBody String raw, HttpServletRequest request, Authentication auth) {
+    Caller c = Caller.from(auth);
+    c.require("orders:write");
+    OrderController.visible(orders, c, id, true);   // 404 before anything else: not your order
     if (key == null || key.isBlank()) {
       throw new ApiException(HttpStatus.BAD_REQUEST, "idempotency-key-missing",
           "send an Idempotency-Key header (a fresh UUID per payment) so retries can't charge twice");
@@ -46,6 +50,8 @@ public class PaymentController {
     // Same key must mean same request: fingerprint the method, path and body.
     String fingerprint = sha256(request.getMethod() + " " + request.getRequestURI() + "\n" + raw);
 
+    // Keys are per caller, as at Stripe: Bob reusing Alice's key must not see Alice's response.
+    key = c.id() + ":" + key;
     IdempotencyKeys.Stored stored = keys.begin(key, fingerprint);   // 422 / 409 thrown from here
     if (stored != null) {
       return ResponseEntity.status(stored.status())

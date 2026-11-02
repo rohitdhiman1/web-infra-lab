@@ -7,9 +7,15 @@ CREATE TABLE IF NOT EXISTS capstone.orders (
   items      JSONB       NOT NULL,
   total      BIGINT      NOT NULL,
   status     TEXT        NOT NULL,                 -- pending | paying | paid | cancelled
+  owner      TEXT        NOT NULL DEFAULT '',      -- A10: the token's sub; who may see and change it
   version    INT         NOT NULL DEFAULT 1,       -- the ETag; bumped on every change, payments included
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- For databases created before A10 added owners. Older rows belong to nobody.
+ALTER TABLE capstone.orders ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT '';
+-- "My orders, newest first" is the common query: owner, then id, matches it exactly.
+CREATE INDEX IF NOT EXISTS orders_owner_id ON capstone.orders (owner, id DESC);
 
 CREATE TABLE IF NOT EXISTS capstone.payments (
   id         BIGSERIAL PRIMARY KEY,
