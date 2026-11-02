@@ -1,4 +1,4 @@
-"""The A10 capstone spec as black-box tests. Set BASE_URL to the server under test."""
+"""The A11 capstone spec as black-box tests. Set BASE_URL to the server under test."""
 
 import os
 import re
@@ -11,11 +11,32 @@ BASE_URL = os.environ.get("BASE_URL", "http://localhost:8080")
 ORDER = {"customer": "ada@example.com", "currency": "EUR", "items": [{"sku": "BOOK-42", "quantity": 2, "unitPrice": 1500}]}
 MP = "application/merge-patch+json"
 PROBLEM = "application/problem+json"
+# The warehouse service's API key: a throwaway lab value, the same in every implementation.
+WAREHOUSE_KEY = "wh_test_4f9c2a7d1e8b6035"
+
+
+def token(user: str) -> str:
+    """A fresh token from the implementation's stand-in identity provider. Each token is a fresh
+    rate-limit bucket, so the suite doesn't trip the limiter except in the test that means to."""
+    res = httpx2.post(f"{BASE_URL}/token", json={"user": user}, timeout=10)
+    assert res.status_code == 200, res.text
+    return res.json()["access_token"]
+
+
+def client_as(user: str) -> httpx2.Client:
+    return httpx2.Client(base_url=BASE_URL, timeout=10, headers={"Authorization": f"Bearer {token(user)}"})
 
 
 @pytest.fixture
 def api():
-    with httpx2.Client(base_url=BASE_URL, timeout=10, headers={"X-API-Key": f"conf-{uuid.uuid4()}"}) as c:
+    """Alice: a customer with orders:read and orders:write."""
+    with client_as("alice") as c:
+        yield c
+
+
+@pytest.fixture
+def anon():
+    with httpx2.Client(base_url=BASE_URL, timeout=10) as c:
         yield c
 
 
@@ -130,3 +151,50 @@ def test_rate_limit_eventually_says_429(api):
             break
     body = assert_problem(res, 429, "rate-limited")
     assert int(res.headers["retry-after"]) >= 1 and body["requestId"]
+
+
+# ---- A10: authentication and authorisation ----
+
+def test_no_credential_is_401_with_a_challenge(anon):
+    res = anon.get("/orders")
+    assert_problem(res, 401, "unauthenticated")
+    assert res.headers["www-authenticate"].startswith("Bearer")
+
+
+def test_bad_credentials_are_401(anon):
+    res = anon.get("/orders", headers={"Authorization": "Bearer not.a.token"})
+    assert_problem(res, 401, "invalid-token")
+    assert 'error="invalid_token"' in res.headers["www-authenticate"]
+    assert_problem(anon.get("/orders", headers={"X-API-Key": "wh_test_guessed"}), 401, "invalid-token")
+
+
+def test_missing_scope_is_403(api):
+    path = create(api).headers["location"]
+    with client_as("sam") as support:  # support: orders:read and orders:read:any, no orders:write
+        assert_problem(support.post("/orders", json=ORDER), 403, "insufficient-scope")
+        res = support.patch(path, content='{"status": "cancelled"}', headers={"Content-Type": MP, "If-Match": '"1"'})
+        assert_problem(res, 403, "insufficient-scope")
+        assert 'scope="orders:write"' in res.headers["www-authenticate"]
+
+
+def test_other_customers_orders_are_404(api):
+    created = create(api)
+    path, oid = created.headers["location"], created.json()["id"]
+    with client_as("bob") as bob:
+        # Exactly what a missing order looks like, so Bob can't tell Alice's order exists.
+        assert_problem(bob.get(path), 404, "order-not-found")
+        assert_problem(bob.patch(path, content='{"status": "cancelled"}', headers={"Content-Type": MP, "If-Match": '"1"'}),
+                       404, "order-not-found")
+        assert_problem(bob.post(f"{path}/payments", json={"amount": 3000}, headers={"Idempotency-Key": str(uuid.uuid4())}),
+                       404, "order-not-found")
+        assert_problem(bob.get(f"{path}/payments"), 404, "order-not-found")
+        assert oid not in [o["id"] for o in bob.get("/orders", params={"limit": 100}).json()["data"]]
+    assert api.get(path).json()["status"] == "pending"  # untouched
+
+
+def test_staff_and_services_may_read_any_order(api):
+    path = create(api).headers["location"]
+    with client_as("sam") as support:
+        assert support.get(path).status_code == 200
+    assert httpx2.get(f"{BASE_URL}{path}", headers={"X-API-Key": WAREHOUSE_KEY}, timeout=10).status_code == 200
+
